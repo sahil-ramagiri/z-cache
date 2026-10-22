@@ -1,6 +1,7 @@
 const std = @import("std");
 const Io = std.Io;
 pub const resp = @import("resp.zig");
+pub const store = @import("store.zig");
 
 test {
     std.testing.refAllDecls(@This());
@@ -13,12 +14,15 @@ pub fn main(init: std.process.Init) !void {
 
     const gpa = init.gpa;
     
-    var kv = std.StringHashMap([]const u8).init(gpa);
-    defer kv.deinit();
+    var kv = try store.Store.init(gpa, 10);
+    defer kv.deinit(gpa);
 
-    try kv.put("Hello", "World!");
+    try kv.set("Hello", "World!");
 
     try writer.print("{s} : {s}\n", .{ "Hello", (kv.get("Hello") orelse "empty") });
+
+    _ = kv.del("Hello");
+    try writer.print("{s} : {any}\n", .{ "Hello", kv.exists("Hello") });
 
     try writer.flush();
 }
