@@ -4,7 +4,7 @@ const assert = std.debug.assert;
 
 pub const key_size_max: u32 = 1024;
 pub const value_size_max: u32 = 1024;
-pub const args_count_max: u8 = 3;
+pub const args_count_max: u8 = 16;
 /// Worst-case wire size of `*3\r\n$3\r\nSET\r\n$1024\r\n<key>\r\n$1024\r\n<val>\r\n`
 pub const command_size_max: u32 = 64 + key_size_max + value_size_max;
 /// Minimum reader buffer size (16 KiB, `>= 2 * command_size_max`).
@@ -29,6 +29,7 @@ pub const ParseError = error{
 };
 
 pub const Command = union(enum) {
+    ping: void,
     set: struct {
         key: []const u8,
         value: []const u8,
@@ -100,6 +101,13 @@ pub fn readBulkString(
     return payload;
 }
 
+fn skipBulkString(reader: *Io.Reader, count: u32) ParseError!void {
+    var i: u32 = 0;
+    while (i < count) : (i += 1) {
+        _ = try readBulkString(reader, value_size_max, error.ValueTooLarge);
+    }
+}
+
 pub fn parseCommand(reader: *Io.Reader) ParseError!?Command {
     if (reader.buffer.len >= command_size_max and
         reader.buffer.len - reader.seek < command_size_max) {
@@ -114,28 +122,48 @@ pub fn parseCommand(reader: *Io.Reader) ParseError!?Command {
     if (prefix != '*') return error.InvalidFrameType;
 
     const arity = try readDecimalCRLF(reader);
-    if (arity < 2 or arity > args_count_max) return error.InvalidArity;
+    if (arity < 1 or arity > args_count_max) return error.InvalidArity;
 
-    const cmd_name = try readBulkString(reader, 6, error.UnknownCommand);
+    const cmd_name = try readBulkString(reader, key_size_max, error.KeyTooLarge);
+    const remaining = arity - 1;
 
-    if (std.ascii.eqlIgnoreCase(cmd_name, "SET")) {
-        if (arity != 3) return error.InvalidArity;
+    if (std.ascii.eqlIgnoreCase(cmd_name, "PING")) {
+        if (arity != 1) {
+            try skipBulkString(reader, remaining);
+            return error.InvalidArity;
+        }
+        return .ping;
+    } else if (std.ascii.eqlIgnoreCase(cmd_name, "SET")) {
+        if (arity != 3) {
+            try skipBulkString(reader, remaining);
+            return error.InvalidArity;
+        }
         const key = try readBulkString(reader, key_size_max, error.KeyTooLarge);
         const value = try readBulkString(reader, value_size_max, error.ValueTooLarge);
         return .{ .set = .{ .key = key, .value = value } };
     } else if (std.ascii.eqlIgnoreCase(cmd_name, "GET")) {
-        if (arity != 2) return error.InvalidArity;
+        if (arity != 2) {
+            try skipBulkString(reader, remaining);
+            return error.InvalidArity;
+        }
         const key = try readBulkString(reader, key_size_max, error.KeyTooLarge);
         return .{ .get = key };
     } else if (std.ascii.eqlIgnoreCase(cmd_name, "EXISTS")) {
-        if (arity != 2) return error.InvalidArity;
+        if (arity != 2) {
+            try skipBulkString(reader, remaining);
+            return error.InvalidArity;
+        }
         const key = try readBulkString(reader, key_size_max, error.KeyTooLarge);
         return .{ .exists = key };
     } else if (std.ascii.eqlIgnoreCase(cmd_name, "DEL")) {
-        if (arity != 2) return error.InvalidArity;
+        if (arity != 2) {
+            try skipBulkString(reader, remaining);
+            return error.InvalidArity;
+        }
         const key = try readBulkString(reader, key_size_max, error.KeyTooLarge);
         return .{ .del = key };
     } else {
+        try skipBulkString(reader, remaining);
         return error.UnknownCommand;
     }
 }

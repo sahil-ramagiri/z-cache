@@ -1,0 +1,30 @@
+-ERR UnknownCommand
+-ERR UnknownCommand
++OK
+$6
+World!
+:1
+:0
+$-1
++OK
+$7
+updated
++OK
+$0
+
++OK
+$9
+empty_key
++OK
+$14
+val1
+$3
+SET!
+-ERR InvalidArity
+-ERR InvalidArity
++PONG
+:1
+:0
+$-1
+:0
+-ERR InvalidFrameType
