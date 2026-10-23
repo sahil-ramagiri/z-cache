@@ -28,42 +28,60 @@ pub const ParseError = error{
     ReadFailed,
 };
 
-pub const Keys = struct {
-    items: [args_count_max - 1][]const u8 = undefined,
-    len: u8 = 0,
-
-    pub fn slice(self: *const Keys) []const []const u8 {
-        return self.items[0..self.len];
-    }
-};
+pub const Key = []const u8;
+pub const Value = []const u8;
+pub const Int = []const u8;
 
 pub const KeyValue = struct {
-    key: []const u8,
-    value: []const u8,
+    key: Key,
+    value: Value,
 };
 
-pub const KeyValues = struct {
-    items: [(args_count_max - 1) / 2]KeyValue = undefined,
-    len: u8 = 0,
-
-    pub fn slice(self: *const KeyValues) []const KeyValue {
-        return self.items[0..self.len];
-    }
+pub const KeyDelta = struct {
+    key: Key,
+    delta: Int,
 };
+
+pub fn List(comptime T: type) type {
+    const elem_arity = switch (@typeInfo(T)) {
+        .@"struct" => |s| s.field_names.len,
+        else => 1,
+    };
+    const capacity = (args_count_max - 1) / elem_arity;
+    return struct {
+        pub const is_resp_list = true;
+        pub const Elem = T;
+        pub const elem_words: u8 = elem_arity;
+
+        items: [capacity]T = undefined,
+        len: u8 = 0,
+
+        pub fn slice(self: *const @This()) []const T {
+            return self.items[0..self.len];
+        }
+    };
+}
+
+pub const Keys = List(Key);
+pub const KeyValues = List(KeyValue);
 
 pub const Command = union(enum) {
     ping: void,
     set: KeyValue,
-    get: []const u8,
+    get: Key,
     exists: Keys,
     del: Keys,
-    strlen: []const u8,
+    strlen: Key,
     append: KeyValue,
     setnx: KeyValue,
-    getdel: []const u8,
+    getdel: Key,
     getset: KeyValue,
     mget: Keys,
     mset: KeyValues,
+    incr: Key,
+    incrby: KeyDelta,
+    decr: Key,
+    decrby: KeyDelta,
 };
 
 const command_name_max: u8 = 8;
@@ -82,10 +100,33 @@ fn cmdWord(word: []const u8) u64 {
     return std.mem.readInt(u64, &bytes, .little);
 }
 
+const PayloadKind = enum {
+    none,
+    single,
+    product,
+    list,
+
+    fn of(comptime T: type) PayloadKind {
+        if (T == void) return .none;
+        if (T == []const u8) return .single;
+        if (@typeInfo(T) == .@"struct") {
+            if (@hasDecl(T, "is_resp_list")) return .list;
+            return .product;
+        }
+        @compileError("Unsupported Command payload type: " ++ @typeName(T));
+    }
+};
+
 comptime {
     assert(cmdWord("A") == 0x41);
     assert(cmdWord("a") == 0x41);
     assert(cmdWord("aB") == 0x4241);
+
+    const u_info = @typeInfo(Command).@"union";
+    for (u_info.field_names, u_info.field_types) |name, Payload| {
+        assert(name.len <= command_name_max);
+        _ = PayloadKind.of(Payload);
+    }
 }
 
 pub fn readDecimalCRLF(reader: *Io.Reader) ParseError!u32 {
@@ -157,6 +198,65 @@ fn skipBulkString(reader: *Io.Reader, count: u32) ParseError!void {
     }
 }
 
+fn readItem(comptime T: type, reader: *Io.Reader) ParseError!T {
+    return switch (comptime PayloadKind.of(T)) {
+        .none => {},
+        .single => try readBulkString(reader, key_size_max, error.KeyTooLarge),
+        .product => blk: {
+            const s_info = @typeInfo(T).@"struct";
+            var item: T = undefined;
+            inline for (s_info.field_names) |field_name| {
+                const is_key = comptime std.mem.eql(u8, field_name, "key");
+                const limit = if (is_key) key_size_max else value_size_max;
+                const err_tag = if (is_key) error.KeyTooLarge else error.ValueTooLarge;
+                @field(item, field_name) = try readBulkString(reader, limit, err_tag);
+            }
+            break :blk item;
+        },
+        .list => unreachable,
+    };
+}
+
+fn parsePayload(comptime Payload: type, reader: *Io.Reader, remaining: u32) ParseError!Payload {
+    return switch (comptime PayloadKind.of(Payload)) {
+        .none => {
+            if (remaining != 0) {
+                try skipBulkString(reader, remaining);
+                return error.InvalidArity;
+            }
+        },
+        .single => {
+            if (remaining != 1) {
+                try skipBulkString(reader, remaining);
+                return error.InvalidArity;
+            }
+            return try readItem(Payload, reader);
+        },
+        .product => {
+            const field_count = @typeInfo(Payload).@"struct".field_names.len;
+            if (remaining != field_count) {
+                try skipBulkString(reader, remaining);
+                return error.InvalidArity;
+            }
+            return try readItem(Payload, reader);
+        },
+        .list => {
+            const step = Payload.elem_words;
+            if (remaining < step or remaining % step != 0) {
+                try skipBulkString(reader, remaining);
+                return error.InvalidArity;
+            }
+            const count: u8 = @intCast(remaining / step);
+            var list: Payload = .{ .len = count };
+            var i: u8 = 0;
+            while (i < count) : (i += 1) {
+                list.items[i] = try readItem(Payload.Elem, reader);
+            }
+            return list;
+        },
+    };
+}
+
 pub fn parseCommand(reader: *Io.Reader) ParseError!?Command {
     if (reader.buffer.len >= command_size_max and
         reader.buffer.len - reader.seek < command_size_max)
@@ -185,58 +285,9 @@ pub fn parseCommand(reader: *Io.Reader) ParseError!?Command {
 
     const u_info = @typeInfo(Command).@"union";
     inline for (u_info.field_names, u_info.field_types) |name, Payload| {
-        comptime assert(name.len <= command_name_max);
-
         if (word == comptime cmdWord(name)) {
-            if (Payload == void) {
-                if (arity != 1) {
-                    try skipBulkString(reader, remaining);
-                    return error.InvalidArity;
-                }
-                return @unionInit(Command, name, {});
-            } else if (Payload == []const u8) {
-                if (arity != 2) {
-                    try skipBulkString(reader, remaining);
-                    return error.InvalidArity;
-                }
-                const key = try readBulkString(reader, key_size_max, error.KeyTooLarge);
-                return @unionInit(Command, name, key);
-            } else if (Payload == Keys) {
-                if (arity < 2) {
-                    try skipBulkString(reader, remaining);
-                    return error.InvalidArity;
-                }
-                var keys: Keys = .{ .len = @intCast(remaining) };
-                var i: u32 = 0;
-                while (i < remaining) : (i += 1) {
-                    keys.items[i] = try readBulkString(reader, key_size_max, error.KeyTooLarge);
-                }
-                return @unionInit(Command, name, keys);
-            } else if (Payload == KeyValues) {
-                if (arity < 3 or remaining % 2 != 0) {
-                    try skipBulkString(reader, remaining);
-                    return error.InvalidArity;
-                }
-                const pair_count: u8 = @intCast(remaining / 2);
-                var kvs: KeyValues = .{ .len = pair_count };
-                var i: u8 = 0;
-                while (i < pair_count) : (i += 1) {
-                    const key = try readBulkString(reader, key_size_max, error.KeyTooLarge);
-                    const value = try readBulkString(reader, value_size_max, error.ValueTooLarge);
-                    kvs.items[i] = .{ .key = key, .value = value };
-                }
-                return @unionInit(Command, name, kvs);
-            } else if (Payload == KeyValue) {
-                if (arity != 3) {
-                    try skipBulkString(reader, remaining);
-                    return error.InvalidArity;
-                }
-                const key = try readBulkString(reader, key_size_max, error.KeyTooLarge);
-                const value = try readBulkString(reader, value_size_max, error.ValueTooLarge);
-                return @unionInit(Command, name, .{ .key = key, .value = value });
-            } else {
-                @compileError("Unsupported Command payload type");
-            }
+            const payload = try parsePayload(Payload, reader, remaining);
+            return @unionInit(Command, name, payload);
         }
     }
 
@@ -342,6 +393,35 @@ test "parseCommand getset, mget, mset, and variadic del/exists" {
     const c4 = (try parseCommand(&reader)).?;
     try std.testing.expect(c4 == .del);
     try std.testing.expectEqual(@as(u8, 2), c4.del.len);
+
+    try std.testing.expectEqual(@as(?Command, null), try parseCommand(&reader));
+}
+
+test "parseCommand incr, decr, incrby, and decrby" {
+    var reader = Io.Reader.fixed(
+        "*2\r\n$4\r\nINCR\r\n$3\r\ncnt\r\n" ++
+            "*2\r\n$4\r\nDECR\r\n$3\r\ncnt\r\n" ++
+            "*3\r\n$6\r\nINCRBY\r\n$3\r\ncnt\r\n$2\r\n10\r\n" ++
+            "*3\r\n$6\r\nDECRBY\r\n$3\r\ncnt\r\n$2\r\n-5\r\n",
+    );
+
+    const c1 = (try parseCommand(&reader)).?;
+    try std.testing.expect(c1 == .incr);
+    try std.testing.expectEqualStrings("cnt", c1.incr);
+
+    const c2 = (try parseCommand(&reader)).?;
+    try std.testing.expect(c2 == .decr);
+    try std.testing.expectEqualStrings("cnt", c2.decr);
+
+    const c3 = (try parseCommand(&reader)).?;
+    try std.testing.expect(c3 == .incrby);
+    try std.testing.expectEqualStrings("cnt", c3.incrby.key);
+    try std.testing.expectEqualStrings("10", c3.incrby.delta);
+
+    const c4 = (try parseCommand(&reader)).?;
+    try std.testing.expect(c4 == .decrby);
+    try std.testing.expectEqualStrings("cnt", c4.decrby.key);
+    try std.testing.expectEqualStrings("-5", c4.decrby.delta);
 
     try std.testing.expectEqual(@as(?Command, null), try parseCommand(&reader));
 }

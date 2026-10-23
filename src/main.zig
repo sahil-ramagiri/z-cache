@@ -83,6 +83,22 @@ pub fn executeCommand(
             }
             try writer.writeAll("+OK\r\n");
         },
+        .incr => |k| {
+            const val = try kv.deltaBy(k, "1", true);
+            try writer.print(":{d}\r\n", .{val});
+        },
+        .incrby => |kd| {
+            const val = try kv.deltaBy(kd.key, kd.delta, true);
+            try writer.print(":{d}\r\n", .{val});
+        },
+        .decr => |k|{
+            const val = try kv.deltaBy(k, "1", false);
+            try writer.print(":{d}\r\n", .{val});
+        },
+        .decrby => |kd| {
+            const val = try kv.deltaBy(kd.key, kd.delta, false);
+            try writer.print(":{d}\r\n", .{val});
+        },
     }
 }
 

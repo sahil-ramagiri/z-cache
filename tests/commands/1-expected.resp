@@ -55,4 +55,12 @@ v2
 *2
 $-1
 $-1
+:1
+:15
+:14
+:-6
+$2
+-6
+-ERR NotAnInteger
+-ERR NotAnInteger
 -ERR InvalidFrameType

@@ -6,6 +6,8 @@ pub const StoreError = error{
     StoreFull,
     InvalidKeySize,
     InvalidValueSize,
+    NotAnInteger,
+    IntegerOverflow,
 };
 
 pub const Store = struct {
@@ -186,6 +188,36 @@ pub const Store = struct {
         try self.set(key, value);
         return null;
     }
+
+    pub fn deltaBy(self: *Store, key: []const u8, delta: []const u8, add: bool) StoreError!i64 {
+        const d = std.fmt.parseInt(i64, delta, 10) catch |err| switch (err) {
+            error.Overflow => return error.IntegerOverflow,
+            error.InvalidCharacter => return error.NotAnInteger,
+        };
+
+        const maybe_slot = self.index.get(key);
+        const v: i64 = if (maybe_slot) |s| blk: {
+            const old_val = self.values[s][0..self.value_lengths[s]];
+            break :blk std.fmt.parseInt(i64, old_val, 10) catch |err| switch (err) {
+                error.Overflow => return error.IntegerOverflow,
+                error.InvalidCharacter => return error.NotAnInteger,
+            };
+        } else 0;
+
+        const new_val, const overflow = if (add) @addWithOverflow(v, d) else @subWithOverflow(v, d);
+        if (overflow != 0) return error.IntegerOverflow;
+
+        const slot = maybe_slot orelse blk: {
+            try self.set(key, "");
+            break :blk self.index.get(key) orelse unreachable;
+        };
+
+        var w = std.Io.Writer.fixed(&self.values[slot]);
+        w.print("{d}", .{new_val}) catch unreachable;
+
+        self.value_lengths[slot] = @intCast(w.end);
+        return new_val;
+    }
 };
 
 test "Store set, get, exists, del, and capacity reuse" {
@@ -268,4 +300,42 @@ test "Store strlen, append, setnx, and getdel" {
     // GETSET on existing key returns previous value via scratch_value and updates slot
     try std.testing.expectEqualStrings("first", (try kv.getset("swap", "second")).?);
     try std.testing.expectEqualStrings("second", kv.get("swap").?);
+}
+
+test "Store deltaBy (incr, decr, incrby, decrby) and error cases" {
+    const gpa = std.testing.allocator;
+    var kv = try Store.init(gpa, 4);
+    defer kv.deinit(gpa);
+
+    // Invalid delta on non-existent key must NOT create the key
+    try std.testing.expectError(StoreError.NotAnInteger, kv.deltaBy("counter", "abc", true));
+    try std.testing.expect(!kv.exists("counter"));
+
+    // INCR / INCRBY on missing key starts from 0
+    try std.testing.expectEqual(@as(i64, 1), try kv.deltaBy("counter", "1", true));
+    try std.testing.expectEqualStrings("1", kv.get("counter").?);
+
+    try std.testing.expectEqual(@as(i64, 11), try kv.deltaBy("counter", "10", true));
+    try std.testing.expectEqualStrings("11", kv.get("counter").?);
+
+    // DECR / DECRBY
+    try std.testing.expectEqual(@as(i64, 10), try kv.deltaBy("counter", "1", false));
+    try std.testing.expectEqual(@as(i64, -5), try kv.deltaBy("counter", "15", false));
+    try std.testing.expectEqualStrings("-5", kv.get("counter").?);
+
+    // Non-integer existing value returns NotAnInteger and preserves value
+    try kv.set("text", "hello");
+    try std.testing.expectError(StoreError.NotAnInteger, kv.deltaBy("text", "1", true));
+    try std.testing.expectEqualStrings("hello", kv.get("text").?);
+
+    // Overflow check (maxInt(i64) + 1 and 0 - minInt(i64))
+    try kv.set("max", "9223372036854775807");
+    try std.testing.expectError(StoreError.IntegerOverflow, kv.deltaBy("max", "1", true));
+    try std.testing.expectEqualStrings("9223372036854775807", kv.get("max").?);
+
+    try std.testing.expectError(
+        StoreError.IntegerOverflow,
+        kv.deltaBy("missing_ov", "-9223372036854775808", false),
+    );
+    try std.testing.expect(!kv.exists("missing_ov"));
 }
