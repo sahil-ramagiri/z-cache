@@ -23,6 +23,9 @@ pub const Store = struct {
     free_slots: []u32,
     free_count: u32,
 
+    /// Scratch buffer used to return the previous value on in-place `getset`
+    scratch_value: [resp.value_size_max]u8 = undefined,
+
     pub fn init(alloc: std.mem.Allocator, entries_max: u32) !Store {
         assert(entries_max > 0);
 
@@ -166,6 +169,23 @@ pub const Store = struct {
 
         return self.values[slot][0..len];
     }
+
+    pub fn getset(self: *Store, key: []const u8, value: []const u8) StoreError!?[]const u8 {
+        if (key.len > resp.key_size_max) return error.InvalidKeySize;
+        if (value.len > resp.value_size_max) return error.InvalidValueSize;
+
+        if (self.index.get(key)) |slot| {
+            const old_len = self.value_lengths[slot];
+            @memcpy(self.scratch_value[0..old_len], self.values[slot][0..old_len]);
+
+            @memcpy(self.values[slot][0..value.len], value);
+            self.value_lengths[slot] = @intCast(value.len);
+            return self.scratch_value[0..old_len];
+        }
+
+        try self.set(key, value);
+        return null;
+    }
 };
 
 test "Store set, get, exists, del, and capacity reuse" {
@@ -240,4 +260,12 @@ test "Store strlen, append, setnx, and getdel" {
     try std.testing.expectEqualStrings("Hello, World", kv.getdel("msg").?);
     try std.testing.expect(!kv.exists("msg"));
     try std.testing.expectEqual(@as(?[]const u8, null), kv.getdel("msg"));
+
+    // GETSET on missing key returns null and sets value
+    try std.testing.expectEqual(@as(?[]const u8, null), try kv.getset("swap", "first"));
+    try std.testing.expectEqualStrings("first", kv.get("swap").?);
+
+    // GETSET on existing key returns previous value via scratch_value and updates slot
+    try std.testing.expectEqualStrings("first", (try kv.getset("swap", "second")).?);
+    try std.testing.expectEqualStrings("second", kv.get("swap").?);
 }

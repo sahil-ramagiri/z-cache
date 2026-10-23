@@ -26,13 +26,19 @@ pub fn executeCommand(
                 try writer.writeAll("$-1\r\n");
             }
         },
-        .exists => |key| {
-            const reply = if (kv.exists(key)) ":1\r\n" else ":0\r\n";
-            try writer.writeAll(reply);
+        .exists => |keys| {
+            var count: u32 = 0;
+            for (keys.slice()) |key| {
+                if (kv.exists(key)) count += 1;
+            }
+            try writer.print(":{d}\r\n", .{count});
         },
-        .del => |key| {
-            const reply = if (kv.del(key)) ":1\r\n" else ":0\r\n";
-            try writer.writeAll(reply);
+        .del => |keys| {
+            var count: u32 = 0;
+            for (keys.slice()) |key| {
+                if (kv.del(key)) count += 1;
+            }
+            try writer.print(":{d}\r\n", .{count});
         },
         .strlen => |key| {
             const len = kv.strlen(key);
@@ -52,6 +58,30 @@ pub fn executeCommand(
             } else {
                 try writer.writeAll("$-1\r\n");
             }
+        },
+        .getset => |gs| {
+            if (try kv.getset(gs.key, gs.value)) |old_val| {
+                try writer.print("${d}\r\n{s}\r\n", .{ old_val.len, old_val });
+            } else {
+                try writer.writeAll("$-1\r\n");
+            }
+        },
+        .mget => |keys| {
+            try writer.print("*{d}\r\n", .{keys.len});
+            for (keys.slice()) |key| {
+                if (kv.get(key)) |value| {
+                    try writer.print("${d}\r\n{s}\r\n", .{ value.len, value });
+                } else {
+                    try writer.writeAll("$-1\r\n");
+                }
+            }
+        },
+        .mset => |kvs| {
+            //TODO: atomic?
+            for (kvs.slice()) |item| {
+                try kv.set(item.key, item.value);
+            }
+            try writer.writeAll("+OK\r\n");
         },
     }
 }

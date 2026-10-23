@@ -40,4 +40,19 @@ $-1
 :1
 $5
 fresh
+$5
+fresh
+$-1
++OK
+*3
+$2
+v1
+$-1
+$2
+v2
+:2
+:2
+*2
+$-1
+$-1
 -ERR InvalidFrameType
