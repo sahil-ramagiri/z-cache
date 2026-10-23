@@ -121,6 +121,51 @@ pub const Store = struct {
 
         return true;
     }
+
+    pub fn strlen(self: *Store, key: []const u8) u32 {
+        const slot = self.index.get(key) orelse return 0;
+        return self.value_lengths[slot];
+    }
+
+    pub fn append(self: *Store, key: []const u8, value: []const u8) StoreError!u32 {
+        //TODO: optimize to remove extra compares and gets
+
+        const slot = self.index.get(key) orelse {
+            try self.set(key, value);
+            return @intCast(value.len);
+        };
+        const old_len = self.value_lengths[slot];
+        const new_len = old_len + value.len;
+
+        if (new_len > resp.value_size_max) return error.InvalidValueSize;
+
+        @memcpy(self.values[slot][old_len..new_len], value);
+        self.value_lengths[slot] = @intCast(new_len);
+
+        return @intCast(new_len);
+    }
+
+    pub fn setnx(self: *Store, key: []const u8, value: []const u8) StoreError!bool {
+        //TODO: optimize to remove extra compares and gets
+
+        if (self.index.contains(key)) return false;
+        
+        try self.set(key, value);
+        return true;
+    }
+
+    pub fn getdel(self: *Store, key: []const u8) ?[]const u8 {
+        const removed = self.index.fetchRemove(key) orelse return null;
+        const slot = removed.value;
+        const len = self.value_lengths[slot];
+
+        self.key_lengths[slot] = 0;
+        self.value_lengths[slot] = 0;
+        self.free_slots[self.free_count] = slot;
+        self.free_count += 1;
+
+        return self.values[slot][0..len];
+    }
 };
 
 test "Store set, get, exists, del, and capacity reuse" {
@@ -158,4 +203,41 @@ test "Store set, get, exists, del, and capacity reuse" {
         try std.testing.expectEqualStrings("v3", kv.get("k3").?);
         try std.testing.expect(kv.del("k3"));
     }
+}
+
+test "Store strlen, append, setnx, and getdel" {
+    const gpa = std.testing.allocator;
+    var kv = try Store.init(gpa, 4);
+    defer kv.deinit(gpa);
+
+    // STRLEN on missing key returns 0
+    try std.testing.expectEqual(@as(u32, 0), kv.strlen("msg"));
+
+    // APPEND on missing key creates key and returns length
+    try std.testing.expectEqual(@as(u32, 5), try kv.append("msg", "Hello"));
+    try std.testing.expectEqual(@as(u32, 5), kv.strlen("msg"));
+    try std.testing.expectEqualStrings("Hello", kv.get("msg").?);
+
+    // APPEND on existing key concatenates in-place
+    try std.testing.expectEqual(@as(u32, 12), try kv.append("msg", ", World"));
+    try std.testing.expectEqual(@as(u32, 12), kv.strlen("msg"));
+    try std.testing.expectEqualStrings("Hello, World", kv.get("msg").?);
+
+    // APPEND exceeding value_size_max returns InvalidValueSize without corrupting value
+    const big: [resp.value_size_max]u8 = @splat('x');
+    try std.testing.expectError(StoreError.InvalidValueSize, kv.append("msg", &big));
+    try std.testing.expectEqualStrings("Hello, World", kv.get("msg").?);
+
+    // SETNX on existing key returns false and preserves old value
+    try std.testing.expect(!(try kv.setnx("msg", "overwrite")));
+    try std.testing.expectEqualStrings("Hello, World", kv.get("msg").?);
+
+    // SETNX on new key returns true and sets value
+    try std.testing.expect(try kv.setnx("fresh", "abc"));
+    try std.testing.expectEqualStrings("abc", kv.get("fresh").?);
+
+    // GETDEL returns value and removes key + recycles slot
+    try std.testing.expectEqualStrings("Hello, World", kv.getdel("msg").?);
+    try std.testing.expect(!kv.exists("msg"));
+    try std.testing.expectEqual(@as(?[]const u8, null), kv.getdel("msg"));
 }

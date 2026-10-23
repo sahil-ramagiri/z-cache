@@ -37,6 +37,16 @@ pub const Command = union(enum) {
     get: []const u8,
     exists: []const u8,
     del: []const u8,
+    strlen: []const u8,
+    append: struct {
+        key: []const u8,
+        value: []const u8,
+    },
+    setnx: struct {
+        key: []const u8,
+        value: []const u8,
+    },
+    getdel: []const u8,
 };
 
 pub fn readDecimalCRLF(reader: *Io.Reader) ParseError!u32 {
@@ -162,6 +172,36 @@ pub fn parseCommand(reader: *Io.Reader) ParseError!?Command {
         }
         const key = try readBulkString(reader, key_size_max, error.KeyTooLarge);
         return .{ .del = key };
+    } else if (std.ascii.eqlIgnoreCase(cmd_name, "STRLEN")) {
+        if (arity != 2) {
+            try skipBulkString(reader, remaining);
+            return error.InvalidArity;
+        }
+        const key = try readBulkString(reader, key_size_max, error.KeyTooLarge);
+        return .{ .strlen = key };
+    } else if (std.ascii.eqlIgnoreCase(cmd_name, "SETNX")) {
+        if (arity != 3) {
+            try skipBulkString(reader, remaining);
+            return error.InvalidArity;
+        }
+        const key = try readBulkString(reader, key_size_max, error.KeyTooLarge);
+        const value = try readBulkString(reader, value_size_max, error.ValueTooLarge);
+        return .{ .setnx = .{ .key = key, .value = value } };
+    } else if (std.ascii.eqlIgnoreCase(cmd_name, "APPEND")) {
+        if (arity != 3) {
+            try skipBulkString(reader, remaining);
+            return error.InvalidArity;
+        }
+        const key = try readBulkString(reader, key_size_max, error.KeyTooLarge);
+        const value = try readBulkString(reader, value_size_max, error.ValueTooLarge);
+        return .{ .append = .{ .key = key, .value = value } };
+    } else if (std.ascii.eqlIgnoreCase(cmd_name, "GETDEL")) {
+        if (arity != 2) {
+            try skipBulkString(reader, remaining);
+            return error.InvalidArity;
+        }
+        const key = try readBulkString(reader, key_size_max, error.KeyTooLarge);
+        return .{ .getdel = key };
     } else {
         try skipBulkString(reader, remaining);
         return error.UnknownCommand;
@@ -206,6 +246,35 @@ test parseCommand {
     const cmd2 = (try parseCommand(&reader)).?;
     try std.testing.expect(cmd2 == .get);
     try std.testing.expectEqualStrings("hello", cmd2.get);
+
+    try std.testing.expectEqual(@as(?Command, null), try parseCommand(&reader));
+}
+
+test "parseCommand strlen, append, setnx, and getdel" {
+    var reader = Io.Reader.fixed(
+        "*2\r\n$6\r\nSTRLEN\r\n$3\r\nkey\r\n" ++
+            "*3\r\n$6\r\nAPPEND\r\n$3\r\nkey\r\n$4\r\ntail\r\n" ++
+            "*3\r\n$5\r\nSETNX\r\n$3\r\nkey\r\n$3\r\nval\r\n" ++
+            "*2\r\n$6\r\nGETDEL\r\n$3\r\nkey\r\n",
+    );
+
+    const c1 = (try parseCommand(&reader)).?;
+    try std.testing.expect(c1 == .strlen);
+    try std.testing.expectEqualStrings("key", c1.strlen);
+
+    const c2 = (try parseCommand(&reader)).?;
+    try std.testing.expect(c2 == .append);
+    try std.testing.expectEqualStrings("key", c2.append.key);
+    try std.testing.expectEqualStrings("tail", c2.append.value);
+
+    const c3 = (try parseCommand(&reader)).?;
+    try std.testing.expect(c3 == .setnx);
+    try std.testing.expectEqualStrings("key", c3.setnx.key);
+    try std.testing.expectEqualStrings("val", c3.setnx.value);
+
+    const c4 = (try parseCommand(&reader)).?;
+    try std.testing.expect(c4 == .getdel);
+    try std.testing.expectEqualStrings("key", c4.getdel);
 
     try std.testing.expectEqual(@as(?Command, null), try parseCommand(&reader));
 }

@@ -34,6 +34,25 @@ pub fn executeCommand(
             const reply = if (kv.del(key)) ":1\r\n" else ":0\r\n";
             try writer.writeAll(reply);
         },
+        .strlen => |key| {
+            const len = kv.strlen(key);
+            try writer.print(":{d}\r\n", .{len});
+        },
+        .append => |append| {
+            const len = try kv.append(append.key, append.value);
+            try writer.print(":{d}\r\n", .{len});
+        },
+        .setnx => |setnx| {
+            const reply = if (try kv.setnx(setnx.key, setnx.value)) ":1\r\n" else ":0\r\n";
+            try writer.writeAll(reply);
+        },
+        .getdel => |key| {
+            if (kv.getdel(key)) |value| {
+                try writer.print("${d}\r\n{s}\r\n", .{ value.len, value });
+            } else {
+                try writer.writeAll("$-1\r\n");
+            }
+        },
     }
 }
 

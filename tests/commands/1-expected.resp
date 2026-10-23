@@ -27,4 +27,17 @@ SET!
 :0
 $-1
 :0
+:0
+:5
+:12
+:12
+:0
+$12
+Hello, World
+$12
+Hello, World
+$-1
+:1
+$5
+fresh
 -ERR InvalidFrameType
